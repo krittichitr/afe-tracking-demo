@@ -133,7 +133,9 @@ export default function NavigationMode() {
   const [patientPos, setPatientPos] = useState<google.maps.LatLngLiteral | null>(null);
 
   // -- Visuals --
+  // -- Visuals --
   const animatedMyPos = useAnimatedPosition(filteredMyPos);
+  const animatedPatientPos = useAnimatedPosition(patientPos); // LERP for Patient
   const smoothHeading = useBufferedHeading(rawHeading); // Using buffer logic
 
   // -- Routing --
@@ -257,6 +259,9 @@ export default function NavigationMode() {
       const ds = new google.maps.DirectionsService();
       ds.route({ origin: routeOrigin, destination: routeDestination, travelMode: google.maps.TravelMode.DRIVING }, (res, status) => {
          if (status === "OK" && res) {
+            // Smart check: Only update if route changed significantly?
+            // DirectionsRenderer handles diffing, but we can avoid flickering by checking structure.
+            // For now, React state update is fine. Key is PRESERVE VIEWPORT.
             setDirections(res);
             const leg = res.routes[0].legs[0];
             setRouteStats({
@@ -266,7 +271,7 @@ export default function NavigationMode() {
          }
       });
     }
-  }, [isLoaded, routeOrigin, routeDestination]);
+  }, [isLoaded, routeOrigin, routeDestination]); // routeOrigin/Dest only update every 20m/10m -> Stable logic
 
   const handleRecenter = () => {
      if (mapRef.current && filteredMyPos) {
@@ -350,15 +355,15 @@ export default function NavigationMode() {
             />
          )}
 
-         {/* Patient Marker */}
-         {patientPos && (
-             <>
-                {/* Layer 1: Glow (DOM Marker) */}
-                <MarkerF position={patientPos} icon={PATIENT_ICON_BG as any} zIndex={90} options={{optimized:false}} />
-                {/* Layer 2: Pin (DOM Marker) */}
-                <MarkerF position={patientPos} icon={PATIENT_ICON_FG as any} zIndex={91} options={{optimized:false}} />
-             </>
-         )}
+          {/* Patient Marker (Using LERP Animated Position) */}
+          {animatedPatientPos && (
+              <>
+                 {/* Layer 1: Glow (DOM Marker) */}
+                 <MarkerF position={animatedPatientPos} icon={PATIENT_ICON_BG as any} zIndex={90} options={{optimized:false}} />
+                 {/* Layer 2: Pin (DOM Marker) */}
+                 <MarkerF position={animatedPatientPos} icon={PATIENT_ICON_FG as any} zIndex={91} options={{optimized:false}} />
+              </>
+          )}
 
          {/* Directions */}
          {directions && <DirectionsRenderer directions={directions} options={{ suppressMarkers: true, polylineOptions: { strokeColor: "#4285F4", strokeWeight: 10, strokeOpacity: 0.9 }, preserveViewport: true }} />}
