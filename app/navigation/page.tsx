@@ -6,7 +6,7 @@ import Link from "next/link";
 
 // Configuration
 const MAP_CONTAINER_STYLE = { width: "100%", height: "100dvh" };
-const PATIENT_ICON = "http://maps.google.com/mapfiles/ms/icons/red-dot.png";
+// PATIENT_ICON removed (moved inside component)
 const INITIAL_CENTER = { lat: 13.7563, lng: 100.5018 };
 const POS_ANIMATION_DURATION = 800; // ms to slide to new pos
 const MIN_MOVEMENT_THRESHOLD = 1.0; // meters (ignore jitter below this)
@@ -123,6 +123,8 @@ function useBufferedHeading(rawHeading: number) {
 
 export default function NavigationMode() {
   const [map, setMap] = useState<google.maps.Map | null>(null);
+
+  // Icons moved to render phase to access google namespace
   
   // -- State --
   // We keep 'filteredMyPos' as the source for the UI animation
@@ -202,7 +204,7 @@ export default function NavigationMode() {
             lastRouteOriginRef.current = newFilteredPos;
         }
       },
-      (err) => console.error(err),
+      (err) => console.error("Geolocation Error:", err.code, err.message),
       { enableHighAccuracy: true, maximumAge: 0, timeout: 5000 }
     );
 
@@ -287,6 +289,22 @@ export default function NavigationMode() {
 
   if (!isLoaded) return <div className="h-[100dvh] bg-black text-white flex center items-center justify-center">Loading...</div>;
 
+  // Icons refined with Anchors for perfect alignment
+  const PATIENT_ICON_FG = {
+      url: "https://cdn-icons-png.flaticon.com/512/684/684908.png", 
+      scaledSize: new google.maps.Size(44, 44),
+      anchor: new google.maps.Point(22, 44)
+  };
+  const PATIENT_ICON_BG = {
+      path: "M 0,0 C -2,-20 -10,-22 -10,-30 A 10,10 0 1,1 10,-30 C 10,-22 2,-20 0,0 z",
+      fillColor: "white",
+      fillOpacity: 1,
+      strokeColor: "white",
+      strokeWeight: 4, 
+      scale: 1.2,
+      anchor: new google.maps.Point(0, 0)
+  };
+
   return (
     <div className="relative w-full h-[100dvh] bg-gray-900 overflow-hidden font-sans">
        {/* Top Bar */}
@@ -333,7 +351,14 @@ export default function NavigationMode() {
          )}
 
          {/* Patient Marker */}
-         {patientPos && <MarkerF position={patientPos} icon={PATIENT_ICON} zIndex={90} options={{optimized:true}} />}
+         {patientPos && (
+             <>
+                {/* Layer 1: Glow (DOM Marker) */}
+                <MarkerF position={patientPos} icon={PATIENT_ICON_BG as any} zIndex={90} options={{optimized:false}} />
+                {/* Layer 2: Pin (DOM Marker) */}
+                <MarkerF position={patientPos} icon={PATIENT_ICON_FG as any} zIndex={91} options={{optimized:false}} />
+             </>
+         )}
 
          {/* Directions */}
          {directions && <DirectionsRenderer directions={directions} options={{ suppressMarkers: true, polylineOptions: { strokeColor: "#4285F4", strokeWeight: 10, strokeOpacity: 0.9 }, preserveViewport: true }} />}
