@@ -1,13 +1,29 @@
 "use client";
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { GoogleMap, useJsApiLoader, DirectionsRenderer, MarkerF } from "@react-google-maps/api";
 import { supabase } from "@/lib/supabaseClient";
 import Link from "next/link";
 
 // Use 100dvh for better mobile browser support
 const mapContainerStyle = { width: "100%", height: "100dvh" };
-const defaultCenter = { lat: 13.7563, lng: 100.5018 };
 const PATIENT_ICON = "http://maps.google.com/mapfiles/ms/icons/red-dot.png";
+const INITIAL_CENTER = { lat: 13.7563, lng: 100.5018 };
+
+// Helper: Calculate Haversine Distance (in meters)
+const getDistance = (pos1: google.maps.LatLngLiteral, pos2: google.maps.LatLngLiteral) => {
+  const R = 6371e3; // metres
+  const φ1 = (pos1.lat * Math.PI) / 180;
+  const φ2 = (pos2.lat * Math.PI) / 180;
+  const Δφ = ((pos2.lat - pos1.lat) * Math.PI) / 180;
+  const Δλ = ((pos2.lng - pos1.lng) * Math.PI) / 180;
+
+  const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
+            Math.cos(φ1) * Math.cos(φ2) *
+            Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+  return R * c; // in meters
+};
 
 // Helper for arrival time calc
 const calculateArrivalTime = (durationText: string) => {
@@ -22,13 +38,22 @@ const calculateArrivalTime = (durationText: string) => {
 
 export default function NavigationMode() {
   const [map, setMap] = useState<google.maps.Map | null>(null);
-  const [myPos, setMyPos] = useState<google.maps.LatLngLiteral | null>(null);
-  const [myHeading, setMyHeading] = useState<number>(0);
-  const [patientPos, setPatientPos] = useState<google.maps.LatLngLiteral | null>(null);
   
+  // Real-time Positions (Raw inputs)
+  const [myPos, setMyPos] = useState<google.maps.LatLngLiteral | null>(null);
+  const [patientPos, setPatientPos] = useState<google.maps.LatLngLiteral | null>(null);
+  const [myHeading, setMyHeading] = useState<number>(0);
+
+  // Routing State (Throttled/Debounced updates)
+  const [routeOrigin, setRouteOrigin] = useState<google.maps.LatLngLiteral | null>(null);
+  const [routeDestination, setRouteDestination] = useState<google.maps.LatLngLiteral | null>(null);
   const [directions, setDirections] = useState<google.maps.DirectionsResult | null>(null);
   const [routeStats, setRouteStats] = useState<{ distance: string; duration: string; arrivalTime: string } | null>(null);
-  
+
+  // Refs for tracking previous valid positions for routing
+  const lastRouteOriginRef = useRef<google.maps.LatLngLiteral | null>(null);
+  const lastRouteDestRef = useRef<google.maps.LatLngLiteral | null>(null);
+
   const { isLoaded } = useJsApiLoader({
     googleMapsApiKey: process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY!,
   });
@@ -40,19 +65,28 @@ export default function NavigationMode() {
     setMap(mapInstance);
   }, []);
 
-  // 1. My Location (Watch)
+  // 1. My Location (Watch) - High Frequency
   useEffect(() => {
     if (!navigator.geolocation) return;
     const watchId = navigator.geolocation.watchPosition(
       (pos) => {
         const { latitude, longitude, heading } = pos.coords;
         const newPos = { lat: latitude, lng: longitude };
+        
+        // Update marker immediately (Smooth user experience)
         setMyPos(newPos);
         if (heading) setMyHeading(heading);
-        
-        // Follow Mode
+
+        // Follow Mode with Smooth Panning
         if (mapRef.current) {
-           mapRef.current.panTo(newPos);
+           mapRef.current.panTo(newPos); 
+        }
+
+        // Optimization: Updates Route Origin only if moved > 20 meters
+        if (!lastRouteOriginRef.current || getDistance(lastRouteOriginRef.current, newPos) > 20) {
+           console.log("Significant movement detected (My Pos). Updating route origin...");
+           setRouteOrigin(newPos);
+           lastRouteOriginRef.current = newPos;
         }
       },
       (err) => console.error("Location error:", err),
@@ -61,34 +95,64 @@ export default function NavigationMode() {
     return () => navigator.geolocation.clearWatch(watchId);
   }, []);
 
-  // 2. Patient Location (Realtime)
+  // 2. Patient Location (Realtime) - Debounced
   useEffect(() => {
+    // Initial Fetch
     const fetchValues = async () => {
       const { data } = await supabase.from("location").select("*").order("created_at", { ascending: false }).limit(1);
       if (data && data[0]) {
-        setPatientPos({ lat: data[0].latitude, lng: data[0].longitude });
+        const initialPos = { lat: data[0].latitude, lng: data[0].longitude };
+        setPatientPos(initialPos);
+        
+        // Set initial route destination
+        setRouteDestination(initialPos);
+        lastRouteDestRef.current = initialPos;
       }
     };
     fetchValues();
 
+    // Debounce Timer Ref
+    let debounceTimer: NodeJS.Timeout;
+
     const channel = supabase
       .channel("nav-mode")
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "location" }, (payload) => {
-        setPatientPos({ lat: payload.new.latitude, lng: payload.new.longitude });
+        const newPatientPos = { lat: payload.new.latitude, lng: payload.new.longitude };
+        
+        // Update marker UI immediately (or throttle if needed, but here we want responsiveness)
+        // Actually, if we want "Smooth Marker", usually handled by library or requestAnimationFrame.
+        // For Google Maps MarkerF, simply updating props is okay but raw updates can jump.
+        // Here we update state immediately for the marker.
+        setPatientPos(newPatientPos);
+
+        // Debounce Route Calculation Logic
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => {
+           // Optimization: Update Route Destination only if moved > 10 meters
+           if (!lastRouteDestRef.current || getDistance(lastRouteDestRef.current, newPatientPos) > 10) {
+              console.log("Significant patient movement detected. Recalculating route...");
+              setRouteDestination(newPatientPos);
+              lastRouteDestRef.current = newPatientPos;
+           }
+        }, 3000); // 3-second debounce window
       })
       .subscribe();
 
-    return () => { supabase.removeChannel(channel); };
+    return () => { 
+      supabase.removeChannel(channel); 
+      clearTimeout(debounceTimer);
+    };
   }, []);
 
-  // 3. Routing
+  // 3. Routing (Triggered ONLY when RouteOrigin or RouteDestination changes significantly)
   useEffect(() => {
-    if (isLoaded && myPos && patientPos) {
+    if (isLoaded && routeOrigin && routeDestination) {
       const directionsService = new google.maps.DirectionsService();
+      
       directionsService.route(
         {
-          origin: myPos,
-          destination: patientPos,
+          origin: routeOrigin,
+          destination: routeDestination,
           travelMode: google.maps.TravelMode.DRIVING,
         },
         (result, status) => {
@@ -105,10 +169,11 @@ export default function NavigationMode() {
         }
       );
     }
-  }, [isLoaded, myPos, patientPos]);
+  }, [isLoaded, routeOrigin, routeDestination]);
 
   const handleRecenter = () => {
     if (mapRef.current && myPos) {
+      // Use smooth transition for recenter
       mapRef.current.panTo(myPos);
       mapRef.current.setZoom(19);
       if (myHeading) mapRef.current.setHeading(myHeading);
@@ -120,7 +185,7 @@ export default function NavigationMode() {
   return (
     <div className="relative w-full h-[100dvh] bg-gray-900 overflow-hidden font-sans">
       
-      {/* 1. Top Bar (Green Instruction) - Adjusted margins for notched phones */}
+      {/* 1. Top Bar (Green Instruction) */}
       <div className="absolute top-4 left-4 right-4 md:left-8 md:right-8 z-30 bg-[#0F5338] text-white p-4 rounded-xl shadow-xl flex items-center justify-between min-h-[80px]">
          <div className="flex items-start gap-3 md:gap-4">
             <div className="mt-1">
@@ -143,7 +208,7 @@ export default function NavigationMode() {
 
       <GoogleMap
         mapContainerStyle={mapContainerStyle}
-        center={myPos || defaultCenter}
+        center={myPos || INITIAL_CENTER}
         zoom={19}
         onLoad={onLoad}
         options={{
@@ -151,12 +216,16 @@ export default function NavigationMode() {
           mapTypeId: 'hybrid', // Satellite Hybrid view
           tilt: 45, // 3D Perspective
           heading: myHeading,
+          gestureHandling: "greedy", // Improve responsiveness
         }}
       >
         {/* User Arrow */}
         {myPos && (
            <MarkerF 
              position={myPos}
+             options={{
+                optimized: true, // Use canvas rendering for smoother performance
+             }}
              icon={{
                path: google.maps.SymbolPath.FORWARD_CLOSED_ARROW,
                scale: 7,
@@ -170,12 +239,17 @@ export default function NavigationMode() {
            />
         )}
 
-        {/* Destination */}
+        {/* Destination Marker */}
         {patientPos && (
-           <MarkerF position={patientPos} icon={PATIENT_ICON} zIndex={90} />
+           <MarkerF 
+              position={patientPos} 
+              icon={PATIENT_ICON} 
+              zIndex={90} 
+              options={{ optimized: true }}
+           />
         )}
 
-        {/* Route */}
+        {/* Route Line */}
         {directions && (
           <DirectionsRenderer
             directions={directions}
@@ -183,9 +257,10 @@ export default function NavigationMode() {
               suppressMarkers: true,
               polylineOptions: {
                 strokeColor: "#4285F4",
-                strokeWeight: 10, // Thicker line
+                strokeWeight: 10, 
                 strokeOpacity: 0.9,
               },
+              preserveViewport: true, // IMPORTANT: Prevents map from auto-fitting on every route update
             }}
           />
         )}
