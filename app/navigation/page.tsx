@@ -26,6 +26,19 @@ const getDistance = (p1: google.maps.LatLngLiteral, p2: google.maps.LatLngLitera
    return R * c;
 };
 
+// Calculate initial bearing between two points
+const calculateBearing = (p1: google.maps.LatLngLiteral, p2: google.maps.LatLngLiteral) => {
+   const φ1 = toRad(p1.lat);
+   const φ2 = toRad(p2.lat);
+   const Δλ = toRad(p2.lng - p1.lng);
+
+   const y = Math.sin(Δλ) * Math.cos(φ2);
+   const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+   let brng = Math.atan2(y, x);
+   brng = (brng * 180) / Math.PI;
+   return (brng + 360) % 360;
+};
+
 const lerp = (start: number, end: number, t: number) => start * (1 - t) + end * t;
 
 // --- Hooks ---
@@ -160,6 +173,8 @@ export default function NavigationMode() {
       googleMapsApiKey: process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY!,
    });
 
+   const [initialSnapped, setInitialSnapped] = useState(false);
+
    const onLoad = useCallback((mapInstance: google.maps.Map) => {
       mapRef.current = mapInstance;
       setMap(mapInstance);
@@ -227,6 +242,8 @@ export default function NavigationMode() {
             lastRawPosRef.current = newFilteredPos; // Store filtered as 'last known' for next iteration
             setFilteredMyPos(newFilteredPos); // Helper for smooth hook
 
+            // Stop Jittering: Only update heading if moving faster than 2 m/s
+            // If stationary, the compass logic (handleOrientation) takes over or it locks to the last known direction
             if (heading !== null && !isNaN(heading) && speed && speed >= 2) {
                setRawHeading(heading);
             }
@@ -251,6 +268,33 @@ export default function NavigationMode() {
    useEffect(() => {
       if (!mapRef.current || !animatedMyPos) return;
 
+      // Immediate Snap on load (Calculate initial bearing and offset)
+      if (!initialSnapped && routeDestination) {
+         const initialBearing = calculateBearing(animatedMyPos, routeDestination);
+         setRawHeading(initialBearing); // Force the raw heading to face the destination
+         mapRef.current.setHeading(initialBearing);
+         mapRef.current.setCenter(animatedMyPos);
+         mapRef.current.setTilt(45);
+         mapRef.current.setZoom(19);
+
+         // Offset the camera so the marker is at the bottom 25% of the screen
+         if (typeof window !== "undefined") {
+            const offsetY = window.innerHeight * -0.25; // Negative Y pans map UP, pushing marker DOWN
+            mapRef.current.panBy(0, offsetY);
+         }
+
+         // We must read the centered position back AFTER panBy to know the visual center
+         const centerAfterOffset = mapRef.current.getCenter();
+         if (centerAfterOffset) {
+            currentCenterRef.current = { lat: centerAfterOffset.lat(), lng: centerAfterOffset.lng() };
+         } else {
+            currentCenterRef.current = animatedMyPos;
+         }
+
+         setInitialSnapped(true);
+         return; // Skip animation loop on the very first frame to ensure snap
+      }
+
       // Initialize center ref if null
       if (!currentCenterRef.current) {
          const center = mapRef.current.getCenter();
@@ -264,21 +308,31 @@ export default function NavigationMode() {
       const animateCamera = () => {
          if (!mapRef.current || !currentCenterRef.current || !animatedMyPos) return;
 
-         // LERP the camera center towards the animated user position
-         // A smaller alpha (e.g., 0.05 - 0.1) makes it very smooth and slightly elastic
-         const targetLat = animatedMyPos.lat;
-         const targetLng = animatedMyPos.lng;
+         // LERP the camera center towards the animated user position BUT offset it
+         // targetLat/Lng are the true GPS position. We want the camera center to be "ahead" of this position
+
+         // To do this simply without complex math, we apply the panBy AFTER lerping the center
+         // BUT wait, if we panBy every frame, it flies off!
+         // Correct approach: we calculate the true center, and use Google Maps' built in padding?
+         // No, padding throws TS error.
+         // Let's just lerp the currentCenter, set it, then panBy.
+         let targetCenter = { ...animatedMyPos };
+
          const currentLat = currentCenterRef.current.lat;
          const currentLng = currentCenterRef.current.lng;
 
-         const newLat = lerp(currentLat, targetLat, 0.08); // 8% per frame
-         const newLng = lerp(currentLng, targetLng, 0.08);
+         let newLat = lerp(currentLat, targetCenter.lat, 0.08); // 8% per frame
+         let newLng = lerp(currentLng, targetCenter.lng, 0.08);
 
          currentCenterRef.current = { lat: newLat, lng: newLng };
 
          // Use setCenter instead of panTo to avoid Google Maps' internal animation queuing which causes stutter
          if (!isUserPanning) {
             mapRef.current.setCenter(currentCenterRef.current);
+            // Apply the offset every frame to keep it down
+            if (typeof window !== "undefined") {
+               mapRef.current.panBy(0, window.innerHeight * -0.25);
+            }
          }
 
          // Rotate map smoothly
@@ -377,7 +431,17 @@ export default function NavigationMode() {
       if (userPanTimeoutRef.current) clearTimeout(userPanTimeoutRef.current);
 
       if (mapRef.current && filteredMyPos) {
-         mapRef.current.panTo(filteredMyPos);
+         mapRef.current.setCenter(filteredMyPos);
+         // Apply bottom offset again
+         if (typeof window !== "undefined") {
+            mapRef.current.panBy(0, window.innerHeight * -0.25);
+         }
+
+         const centerAfterOffset = mapRef.current.getCenter();
+         if (centerAfterOffset) {
+            currentCenterRef.current = { lat: centerAfterOffset.lat(), lng: centerAfterOffset.lng() };
+         }
+
          mapRef.current.setZoom(19);
          mapRef.current.setHeading(smoothHeading);
       }
@@ -440,7 +504,13 @@ export default function NavigationMode() {
             onDragStart={handleMapDragStart}
             onDragEnd={handleMapDragEnd}
             onZoomChanged={handleMapDragStart} // When user zooms, treat it as panning so we don't snap back immediately
-            options={{ disableDefaultUI: true, mapTypeId: 'hybrid', tilt: 45, heading: smoothHeading, gestureHandling: "greedy" }}
+            options={{
+               disableDefaultUI: true,
+               mapTypeId: 'hybrid',
+               tilt: 45,
+               heading: smoothHeading,
+               gestureHandling: "greedy"
+            }}
          >
             {/* User Marker (Blue Arrow) */}
             {animatedMyPos && (
