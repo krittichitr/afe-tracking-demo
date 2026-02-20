@@ -25,15 +25,6 @@ export default function DashboardV2() {
     scale: 1.2,
   };
 
-  const MY_LOC_ICON_OPT = {
-    path: typeof google !== "undefined" ? google.maps.SymbolPath.FORWARD_CLOSED_ARROW : 1,
-    scale: 6,
-    fillColor: "#4285F4",
-    fillOpacity: 1,
-    strokeColor: "white",
-    strokeWeight: 2,
-    rotation: 0 // Will clearly show direction
-  };
   const [currentPos, setCurrentPos] = useState<google.maps.LatLngLiteral>(defaultCenter);
   const [myPos, setMyPos] = useState<google.maps.LatLngLiteral | null>(null);
   const [heading, setHeading] = useState<number>(0); // Heading/Rotation
@@ -189,6 +180,16 @@ export default function DashboardV2() {
       <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-red-600"></div>
     </div>
   );
+
+  const MY_LOC_ICON_OPT = {
+    path: google.maps.SymbolPath.FORWARD_CLOSED_ARROW,
+    scale: 6,
+    fillColor: "#4285F4",
+    fillOpacity: 1,
+    strokeColor: "white",
+    strokeWeight: 2,
+    rotation: 0
+  };
 
   return (
     <div className="relative h-screen w-full bg-gray-100 overflow-hidden font-sans">
