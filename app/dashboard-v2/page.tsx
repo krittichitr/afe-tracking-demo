@@ -67,7 +67,7 @@ export default function DashboardV2() {
 
   // Handle Compass / Heading
   useEffect(() => {
-    const handleOrientation = (event: DeviceOrientationEvent) => {
+    const handleOrientation = (event: any) => {
       if (event.webkitCompassHeading) {
         // iOS
         setHeading(event.webkitCompassHeading);
@@ -211,7 +211,7 @@ export default function DashboardV2() {
             // Padding logic: Top padding implies the "active" viewport starts lower. 
             // So centering on a point puts it in the middle of the active viewport, 
             // which is visually lower on the screen if top padding > bottom padding.
-            padding: padding
+            // padding: padding
           }}
         >
           {myPos && <MarkerF position={myPos} icon={{ ...MY_LOC_ICON_OPT as any, rotation: heading }} zIndex={2} />}
