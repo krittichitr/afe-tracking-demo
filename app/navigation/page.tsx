@@ -139,6 +139,10 @@ export default function NavigationMode() {
    const animatedPatientPos = useAnimatedPosition(patientPos); // LERP for Patient
    const smoothHeading = useBufferedHeading(rawHeading); // Using buffer logic
 
+   // -- User Interaction State --
+   const [isUserPanning, setIsUserPanning] = useState(false);
+   const userPanTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
    // -- Routing --
    const [routeOrigin, setRouteOrigin] = useState<google.maps.LatLngLiteral | null>(null);
    const [routeDestination, setRouteDestination] = useState<google.maps.LatLngLiteral | null>(null);
@@ -271,7 +275,9 @@ export default function NavigationMode() {
          currentCenterRef.current = { lat: newLat, lng: newLng };
 
          // Use setCenter instead of panTo to avoid Google Maps' internal animation queuing which causes stutter
-         mapRef.current.setCenter(currentCenterRef.current);
+         if (!isUserPanning) {
+            mapRef.current.setCenter(currentCenterRef.current);
+         }
 
          // Rotate map smoothly
          const currentHeading = mapRef.current.getHeading() || 0;
@@ -298,6 +304,20 @@ export default function NavigationMode() {
          if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
       };
    }, [animatedMyPos, smoothHeading]);
+
+   // --- Handle User Map Interaction ---
+   const handleMapDragStart = useCallback(() => {
+      setIsUserPanning(true);
+      if (userPanTimeoutRef.current) clearTimeout(userPanTimeoutRef.current);
+   }, []);
+
+   const handleMapDragEnd = useCallback(() => {
+      // Resume follow mode after 5 seconds of inactivity
+      if (userPanTimeoutRef.current) clearTimeout(userPanTimeoutRef.current);
+      userPanTimeoutRef.current = setTimeout(() => {
+         setIsUserPanning(false);
+      }, 5000);
+   }, []);
 
    // --- 3. Patient Location ---
    useEffect(() => {
@@ -349,6 +369,9 @@ export default function NavigationMode() {
    }, [isLoaded, routeOrigin, routeDestination]); // routeOrigin/Dest only update every 20m/10m -> Stable logic
 
    const handleRecenter = () => {
+      setIsUserPanning(false);
+      if (userPanTimeoutRef.current) clearTimeout(userPanTimeoutRef.current);
+
       if (mapRef.current && filteredMyPos) {
          mapRef.current.panTo(filteredMyPos);
          mapRef.current.setZoom(19);
@@ -410,6 +433,9 @@ export default function NavigationMode() {
             center={INITIAL_CENTER} // Initial only, controlled by panTo later
             zoom={19}
             onLoad={onLoad}
+            onDragStart={handleMapDragStart}
+            onDragEnd={handleMapDragEnd}
+            onZoomChanged={handleMapDragStart} // When user zooms, treat it as panning so we don't snap back immediately
             options={{ disableDefaultUI: true, mapTypeId: 'hybrid', tilt: 45, heading: smoothHeading, gestureHandling: "greedy" }}
          >
             {/* User Marker (Blue Arrow) */}
@@ -465,9 +491,9 @@ export default function NavigationMode() {
             </div>
          </div>
 
-         <div onClick={handleRecenter} className="absolute bottom-44 md:bottom-40 left-4 z-30 bg-white px-4 py-2 rounded-full shadow-lg flex items-center gap-2 cursor-pointer text-blue-600 font-bold text-sm tracking-wide hover:bg-gray-50 transition-colors">
+         <div onClick={handleRecenter} className={`absolute bottom-44 md:bottom-40 left-4 z-30 px-4 py-2 rounded-full shadow-lg flex items-center gap-2 cursor-pointer font-bold text-sm tracking-wide transition-all ${isUserPanning ? 'bg-blue-600 text-white' : 'bg-white text-blue-600 hover:bg-gray-50'}`}>
             <svg className="w-4 h-4 transform rotate-45" fill="currentColor" viewBox="0 0 20 20"><path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.429A1 1 0 009 15.571V11a1 1 0 112 0v4.571a1 1 0 00.725.962l5 1.428a1 1 0 001.17-1.408l-7-14z" /></svg>
-            ปรับจุดกลาง
+            {isUserPanning ? 'กลับมาที่ตำแหน่งปัจจุบัน' : 'ปรับจุดกลาง'}
          </div>
 
          <div className="absolute bottom-0 left-0 w-full z-30 bg-white rounded-t-3xl shadow-[0_-5px_20px_rgba(0,0,0,0.2)] px-6 py-6 pb-safe md:pb-10 transition-transform duration-300">
