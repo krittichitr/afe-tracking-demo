@@ -39,6 +39,69 @@ const calculateBearing = (p1: google.maps.LatLngLiteral, p2: google.maps.LatLngL
    return (brng + 360) % 360;
 };
 
+// --- Route Snapping Math ---
+// Projects a point onto a line segment (p1 -> p2) and returns the closest point on that segment
+const getClosestPointOnSegment = (p: google.maps.LatLngLiteral, p1: google.maps.LatLngLiteral, p2: google.maps.LatLngLiteral) => {
+   const x = p.lng, y = p.lat;
+   const x1 = p1.lng, y1 = p1.lat;
+   const x2 = p2.lng, y2 = p2.lat;
+
+   const A = x - x1;
+   const B = y - y1;
+   const C = x2 - x1;
+   const D = y2 - y1;
+
+   const dot = A * C + B * D;
+   const lenSq = C * C + D * D;
+   let param = -1;
+
+   if (lenSq !== 0) param = dot / lenSq;
+
+   let xx, yy;
+
+   if (param < 0) {
+      xx = x1; yy = y1;
+   } else if (param > 1) {
+      xx = x2; yy = y2;
+   } else {
+      xx = x1 + param * C;
+      yy = y1 + param * D;
+   }
+
+   return { lat: yy, lng: xx };
+};
+
+// Given a position and the Google Maps directions result, find the closest point on the path
+const snapToRoute = (pos: google.maps.LatLngLiteral, directions: google.maps.DirectionsResult | null) => {
+   if (!directions || !directions.routes || directions.routes.length === 0) return pos;
+
+   const path = directions.routes[0].overview_path;
+   let closestPoint = pos;
+   let minDistance = Infinity;
+
+   // Check distance to every segment in the path (could be optimized, but ok for now)
+   for (let i = 0; i < path.length - 1; i++) {
+      const p1 = { lat: path[i].lat(), lng: path[i].lng() };
+      const p2 = { lat: path[i + 1].lat(), lng: path[i + 1].lng() };
+
+      const ptOnSegment = getClosestPointOnSegment(pos, p1, p2);
+      const dist = Math.sqrt(Math.pow(ptOnSegment.lat - pos.lat, 2) + Math.pow(ptOnSegment.lng - pos.lng, 2));
+
+      if (dist < minDistance) {
+         minDistance = dist;
+         closestPoint = ptOnSegment;
+      }
+   }
+
+   // If the closest point is surprisingly far (e.g., > 100 meters), don't snap (user might have completely left the road)
+   // 0.001 degrees lat/lng is roughly 111 meters
+   if (minDistance > 0.001) {
+      return pos;
+   }
+
+   return closestPoint;
+};
+
 const lerp = (start: number, end: number, t: number) => start * (1 - t) + end * t;
 
 // --- Hooks ---
@@ -237,7 +300,10 @@ export default function NavigationMode() {
                filteredLng = lerp(lastRawPosRef.current.lng, newRawPos.lng, alpha);
             }
 
-            const newFilteredPos = { lat: filteredLat, lng: filteredLng };
+            let newFilteredPos = { lat: filteredLat, lng: filteredLng };
+
+            // Apply Snap-to-Road if we have an active route
+            newFilteredPos = snapToRoute(newFilteredPos, directions);
 
             lastRawPosRef.current = newFilteredPos; // Store filtered as 'last known' for next iteration
             setFilteredMyPos(newFilteredPos); // Helper for smooth hook
@@ -259,7 +325,7 @@ export default function NavigationMode() {
       );
 
       return () => navigator.geolocation.clearWatch(watchId);
-   }, []);
+   }, [directions]); // Dependencies updated to snap to the latest directions path
 
    // --- 2. Camera Panning (Ultra-Smooth requestAnimationFrame loop) ---
    const currentCenterRef = useRef<google.maps.LatLngLiteral | null>(null);
@@ -309,20 +375,18 @@ export default function NavigationMode() {
          if (!mapRef.current || !currentCenterRef.current || !animatedMyPos) return;
 
          // LERP the camera center towards the animated user position BUT offset it
-         // targetLat/Lng are the true GPS position. We want the camera center to be "ahead" of this position
+         // To maintain absolute smooth 60fps locking on the user with the offset, we do the math
+         // by applying the panBy AFTER setting the center, but we track the 'logical' center instead of querying the map every frame,
+         // since querying the map (getCenter) during a continuous setCenter animation causes floating point jitter!
 
-         // To do this simply without complex math, we apply the panBy AFTER lerping the center
-         // BUT wait, if we panBy every frame, it flies off!
-         // Correct approach: we calculate the true center, and use Google Maps' built in padding?
-         // No, padding throws TS error.
-         // Let's just lerp the currentCenter, set it, then panBy.
          let targetCenter = { ...animatedMyPos };
 
          const currentLat = currentCenterRef.current.lat;
          const currentLng = currentCenterRef.current.lng;
 
-         let newLat = lerp(currentLat, targetCenter.lat, 0.08); // 8% per frame
-         let newLng = lerp(currentLng, targetCenter.lng, 0.08);
+         // High lerp value ensures tight responsive tracking to the smoothly animating marker
+         let newLat = lerp(currentLat, targetCenter.lat, 0.15);
+         let newLng = lerp(currentLng, targetCenter.lng, 0.15);
 
          currentCenterRef.current = { lat: newLat, lng: newLng };
 
@@ -345,7 +409,7 @@ export default function NavigationMode() {
                if (headingDiff > 180) headingDiff -= 360;
                if (headingDiff < -180) headingDiff += 360;
 
-               const newHeading = currentHeading + (headingDiff * 0.1);
+               const newHeading = currentHeading + (headingDiff * 0.05); // Smooth 5% rotate
                mapRef.current.setHeading(newHeading);
             }
          }
@@ -356,12 +420,15 @@ export default function NavigationMode() {
       if (animationFrameRef.current) {
          cancelAnimationFrame(animationFrameRef.current);
       }
-      animationFrameRef.current = requestAnimationFrame(animateCamera);
+      // Only start animating if we have passed the initial snap phase
+      if (initialSnapped) {
+         animationFrameRef.current = requestAnimationFrame(animateCamera);
+      }
 
       return () => {
          if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
       };
-   }, [animatedMyPos, smoothHeading]);
+   }, [animatedMyPos, smoothHeading, isUserPanning, initialSnapped, routeDestination]);
 
    // --- Handle User Map Interaction ---
    const handleMapDragStart = useCallback(() => {
