@@ -168,7 +168,9 @@ export default function NavigationMode() {
    // Handle Compass / Heading fallback
    useEffect(() => {
       const handleOrientation = (event: any) => {
-         if (currentSpeedRef.current < 1) { // Only use compass if stationary or moving very slow
+         // Default to compass when slow or stationary
+         // This ensures the map aligns with the phone's physical direction immediately
+         if (currentSpeedRef.current < 2) {
             if (event.webkitCompassHeading) {
                setRawHeading(event.webkitCompassHeading);
             } else if (event.alpha) {
@@ -225,7 +227,7 @@ export default function NavigationMode() {
             lastRawPosRef.current = newFilteredPos; // Store filtered as 'last known' for next iteration
             setFilteredMyPos(newFilteredPos); // Helper for smooth hook
 
-            if (heading !== null && !isNaN(heading) && currentSpeedRef.current >= 1) {
+            if (heading !== null && !isNaN(heading) && speed && speed >= 2) {
                setRawHeading(heading);
             }
 
@@ -280,16 +282,18 @@ export default function NavigationMode() {
          }
 
          // Rotate map smoothly
-         const currentHeading = mapRef.current.getHeading() || 0;
-         if (Math.abs(currentHeading - smoothHeading) > 0.5) {
-            // Also lerp heading for smoothness
-            let headingDiff = smoothHeading - currentHeading;
-            // Handle 360 wrap around
-            if (headingDiff > 180) headingDiff -= 360;
-            if (headingDiff < -180) headingDiff += 360;
+         if (!isUserPanning) {
+            const currentHeading = mapRef.current.getHeading() || 0;
+            if (Math.abs(currentHeading - smoothHeading) > 0.5) {
+               // Also lerp heading for smoothness
+               let headingDiff = smoothHeading - currentHeading;
+               // Handle 360 wrap around
+               if (headingDiff > 180) headingDiff -= 360;
+               if (headingDiff < -180) headingDiff += 360;
 
-            const newHeading = currentHeading + (headingDiff * 0.1);
-            mapRef.current.setHeading(newHeading);
+               const newHeading = currentHeading + (headingDiff * 0.1);
+               mapRef.current.setHeading(newHeading);
+            }
          }
 
          animationFrameRef.current = requestAnimationFrame(animateCamera);
