@@ -10,6 +10,7 @@ const MAP_CONTAINER_STYLE = { width: "100%", height: "100dvh" };
 const INITIAL_CENTER = { lat: 13.7563, lng: 100.5018 };
 const POS_ANIMATION_DURATION = 800; // ms to slide to new pos
 const MIN_MOVEMENT_THRESHOLD = 1.0; // meters (ignore jitter below this)
+const PAN_THRESHOLD = 5.0; // meters (only pan map if user moves more than this from center)
 
 // --- Math Helpers ---
 const toRad = (d: number) => (d * Math.PI) / 180;
@@ -240,11 +241,27 @@ export default function NavigationMode() {
    // --- 2. Camera Panning (Using the Visual Position) ---
    useEffect(() => {
       if (mapRef.current && animatedMyPos) {
-         // Pan to the ANIMATED position so the camera glides with the marker
-         mapRef.current.panTo(animatedMyPos);
+         // Instead of panning every single frame (which causes jitter because GPS coords fluctuate slightly),
+         // we check the distance between the current map center and the actual position.
+         // If it's further than X meters, then we pan. This creates a "deadzone" where the phone
+         // can roam freely in the middle without the background shaking.
+         const currentCenter = mapRef.current.getCenter();
+         if (currentCenter) {
+            const centerPos = { lat: currentCenter.lat(), lng: currentCenter.lng() };
+            const distToCenter = getDistance(centerPos, animatedMyPos);
 
-         // Auto-rotate map to follow phone direction / route
-         mapRef.current.setHeading(smoothHeading);
+            if (distToCenter > PAN_THRESHOLD) {
+               mapRef.current.panTo(animatedMyPos);
+            }
+         } else {
+            mapRef.current.panTo(animatedMyPos);
+         }
+
+         // Rotate map smoothly, only if heading changes significantly (e.g., > 1 degree)
+         const currentHeading = mapRef.current.getHeading() || 0;
+         if (Math.abs(currentHeading - smoothHeading) > 1.0) {
+            mapRef.current.setHeading(smoothHeading);
+         }
       }
    }, [animatedMyPos, smoothHeading]);
 
