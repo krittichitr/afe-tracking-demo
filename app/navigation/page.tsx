@@ -10,7 +10,7 @@ const MAP_CONTAINER_STYLE = { width: "100%", height: "100dvh" };
 const INITIAL_CENTER = { lat: 13.7563, lng: 100.5018 };
 const POS_ANIMATION_DURATION = 800; // ms to slide to new pos
 const MIN_MOVEMENT_THRESHOLD = 1.0; // meters (ignore jitter below this)
-const PAN_THRESHOLD = 5.0; // meters (only pan map if user moves more than this from center)
+// PAN_THRESHOLD removed: We want continuous smooth tracking, not a deadzone
 
 // --- Math Helpers ---
 const toRad = (d: number) => (d * Math.PI) / 180;
@@ -238,31 +238,65 @@ export default function NavigationMode() {
       return () => navigator.geolocation.clearWatch(watchId);
    }, []);
 
-   // --- 2. Camera Panning (Using the Visual Position) ---
+   // --- 2. Camera Panning (Ultra-Smooth requestAnimationFrame loop) ---
+   const currentCenterRef = useRef<google.maps.LatLngLiteral | null>(null);
+   const animationFrameRef = useRef<number | null>(null);
+
    useEffect(() => {
-      if (mapRef.current && animatedMyPos) {
-         // Instead of panning every single frame (which causes jitter because GPS coords fluctuate slightly),
-         // we check the distance between the current map center and the actual position.
-         // If it's further than X meters, then we pan. This creates a "deadzone" where the phone
-         // can roam freely in the middle without the background shaking.
-         const currentCenter = mapRef.current.getCenter();
-         if (currentCenter) {
-            const centerPos = { lat: currentCenter.lat(), lng: currentCenter.lng() };
-            const distToCenter = getDistance(centerPos, animatedMyPos);
+      if (!mapRef.current || !animatedMyPos) return;
 
-            if (distToCenter > PAN_THRESHOLD) {
-               mapRef.current.panTo(animatedMyPos);
-            }
+      // Initialize center ref if null
+      if (!currentCenterRef.current) {
+         const center = mapRef.current.getCenter();
+         if (center) {
+            currentCenterRef.current = { lat: center.lat(), lng: center.lng() };
          } else {
-            mapRef.current.panTo(animatedMyPos);
-         }
-
-         // Rotate map smoothly, only if heading changes significantly (e.g., > 1 degree)
-         const currentHeading = mapRef.current.getHeading() || 0;
-         if (Math.abs(currentHeading - smoothHeading) > 1.0) {
-            mapRef.current.setHeading(smoothHeading);
+            currentCenterRef.current = animatedMyPos;
          }
       }
+
+      const animateCamera = () => {
+         if (!mapRef.current || !currentCenterRef.current || !animatedMyPos) return;
+
+         // LERP the camera center towards the animated user position
+         // A smaller alpha (e.g., 0.05 - 0.1) makes it very smooth and slightly elastic
+         const targetLat = animatedMyPos.lat;
+         const targetLng = animatedMyPos.lng;
+         const currentLat = currentCenterRef.current.lat;
+         const currentLng = currentCenterRef.current.lng;
+
+         const newLat = lerp(currentLat, targetLat, 0.08); // 8% per frame
+         const newLng = lerp(currentLng, targetLng, 0.08);
+
+         currentCenterRef.current = { lat: newLat, lng: newLng };
+
+         // Use setCenter instead of panTo to avoid Google Maps' internal animation queuing which causes stutter
+         mapRef.current.setCenter(currentCenterRef.current);
+
+         // Rotate map smoothly
+         const currentHeading = mapRef.current.getHeading() || 0;
+         if (Math.abs(currentHeading - smoothHeading) > 0.5) {
+            // Also lerp heading for smoothness
+            let headingDiff = smoothHeading - currentHeading;
+            // Handle 360 wrap around
+            if (headingDiff > 180) headingDiff -= 360;
+            if (headingDiff < -180) headingDiff += 360;
+
+            const newHeading = currentHeading + (headingDiff * 0.1);
+            mapRef.current.setHeading(newHeading);
+         }
+
+         animationFrameRef.current = requestAnimationFrame(animateCamera);
+      };
+
+      if (animationFrameRef.current) {
+         cancelAnimationFrame(animationFrameRef.current);
+      }
+      animationFrameRef.current = requestAnimationFrame(animateCamera);
+
+      return () => {
+         if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
+      };
    }, [animatedMyPos, smoothHeading]);
 
    // --- 3. Patient Location ---
